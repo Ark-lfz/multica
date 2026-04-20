@@ -242,8 +242,7 @@ func checkDockerComposeVersion() error {
 	majorStr, _, _ := strings.Cut(version, ".")
 	major, parseErr := strconv.Atoi(majorStr)
 	if parseErr != nil {
-		// Unparseable — don't block; installer preflight will catch it if really wrong.
-		return nil
+		return fmt.Errorf("Could not parse Docker Compose version %q — please ensure Compose v2.x or later is installed.", version)
 	}
 	if major < 2 {
 		return fmt.Errorf("Docker Compose %s is too old. Self-hosting requires v2.x or later. Upgrade Docker Desktop: https://docs.docker.com/compose/install/", version)
