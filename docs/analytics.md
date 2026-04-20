@@ -111,20 +111,76 @@ looking at whether the user has a prior `workspace_created` event (use a
 funnel with "first time user does X" or a cohort on
 `person_properties.$initial_event`). No information is lost.
 
-## Forthcoming events (PR 2 / PR 3)
+### `runtime_registered`
 
-These are listed here so the schema stays in one place. They ship in later
-PRs:
+Fires the first time a `(workspace_id, daemon_id, provider)` tuple is
+upserted. Heartbeats and repeat registrations never re-emit. First-time
+detection uses Postgres `xmax = 0` on the upsert RETURNING clause — no
+extra query, no race.
 
-- `runtime_registered` — first-time runtime upsert per workspace; detected
-  via Postgres `xmax = 0` on the insert-on-conflict query.
-- `issue_executed` — fires **once per issue**, when the issue's first task
-  reaches terminal `done` state. Backed by an `issues.first_executed_at`
-  column populated atomically so retries / re-assignments don't inflate
-  funnel counts.
-- `team_invite_sent` — `CreateInvitation` emits; `is_first_invite_for_workspace`
-  marks the expansion funnel's first step.
-- `team_invite_accepted` — expansion funnel terminal event.
+| Property | Type | Description |
+|---|---|---|
+| `runtime_id` | string (UUID) | The newly created agent_runtime row id. |
+| `provider` | string | e.g. `"codex"`, `"claude"`. |
+| `runtime_version` | string | Version of the agent runtime binary. |
+| `cli_version` | string | Version of the `multica` CLI that registered it. |
+
+`distinct_id` is the authenticated owner's user id when the daemon was
+registered via a member's JWT/PAT; daemon-token registrations fall back to
+`workspace:<workspace_id>` so PostHog doesn't bucket unrelated daemons
+under a single "anonymous" person.
+
+### `issue_executed`
+
+Fires **at most once per issue** — when the first task on that issue
+reaches terminal `done` state. Backed by an atomic
+`UPDATE issue SET first_executed_at = now() WHERE id = $1 AND first_executed_at IS NULL RETURNING *`;
+retries, re-assignments, and comment-triggered follow-up tasks all hit the
+WHERE clause and no-op, so the `≥1 / ≥2 / ≥5 / ≥10` funnel buckets count
+distinct issues, not tasks.
+
+| Property | Type | Description |
+|---|---|---|
+| `issue_id` | string (UUID) | |
+| `nth_issue_for_workspace` | int64 | Number of issues in this workspace that have ever reached first execution, including this one. Drives the WAW bucket filters. |
+| `task_duration_ms` | int64 | Wall-clock time between `task.started_at` and `task.completed_at`. Zero when the task was created in a completed state (rare). |
+
+`distinct_id` prefers the issue's human creator so agent-executed events
+flow into the issue-author's person profile (same place `signup` and
+`workspace_created` land). Agent-created issues prefix with `agent:` to
+keep PostHog from merging the agent into a user record.
+
+### `team_invite_sent`
+
+Fires from `CreateInvitation` after the DB row is written.
+
+| Property | Type | Description |
+|---|---|---|
+| `invited_email_domain` | string | Lower-cased domain; full email lives in the invitation row, not the event. |
+| `invite_method` | string | Currently always `"email"`. Future non-email invite flows (share link, SCIM) should pass their own value. |
+
+`distinct_id` is the inviter's user id.
+
+### `team_invite_accepted`
+
+Fires from `AcceptInvitation` after both the invitation row is marked
+accepted and the member row is inserted in the same transaction.
+
+| Property | Type | Description |
+|---|---|---|
+| `days_since_invite` | int64 | Whole days from invitation creation to acceptance. Lets us segment "accepted same day" (warm) from "dug out of email weeks later" (cold). |
+
+`distinct_id` is the invitee's user id — this is the event that closes the
+expansion funnel.
+
+### Frontend-only events
+
+- `$pageview` — captured explicitly by the core analytics module on each
+  route change (posthog-js's automatic capture is disabled so we control
+  the event shape).
+- Attribution is NOT a separate event; UTM + referrer origin are stored in
+  the `multica_signup_source` cookie on the first anonymous pageview and
+  read by the backend's `signup` emission.
 
 ## Governance
 
